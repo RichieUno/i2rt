@@ -309,9 +309,10 @@ class MotorChainRobot(Robot):
 
         # Check arm joints (exclude gripper if present)
         if self._gripper_index is not None:
-            # Only check arm joints, not the gripper
+            # Only check arm joints, not the gripper. The limits are sliced too: a gripper-only robot
+            # takes them from the gripper's model, whose finger joints are not arm joints, and has none.
             arm_pos = current_pos[: self._gripper_index]
-            arm_limits = self._joint_limits
+            arm_limits = self._joint_limits[: self._gripper_index]
         else:
             # Check all joints
             arm_pos = current_pos
@@ -649,14 +650,28 @@ class MotorChainRobot(Robot):
 
         if self._joint_limits is not None:
             if self._gripper_index is not None:
+                # Sliced for the same reason as in _check_current_qpos_in_joint_limits: a gripper-only
+                # robot's limits come from the gripper model's finger joints, and it has no arm joints.
+                arm_limits = self._joint_limits[: self._gripper_index]
                 pos[: self._gripper_index] = np.clip(
                     pos[: self._gripper_index],
-                    self._joint_limits[:, 0],
-                    self._joint_limits[:, 1],
+                    arm_limits[:, 0],
+                    arm_limits[:, 1],
                 )
             else:
                 pos = np.clip(pos, self._joint_limits[:, 0], self._joint_limits[:, 1])
         return pos
+
+    def _require_finite(self, **fields: Any) -> None:
+        """Refuse a command carrying NaN or inf, before it can replace the one being executed.
+
+        ``np.clip`` passes NaN straight through and the MIT frame encoder turns it into an arbitrary
+        integer, so a non-finite target would reach the motor as a random setpoint. Raising leaves
+        ``self._commands`` untouched: the robot keeps executing the last valid command.
+        """
+        for name, value in fields.items():
+            if value is not None and not np.all(np.isfinite(np.asarray(value, dtype=float))):
+                raise ValueError(f"{self}: command {name} must be finite, got {value}")
 
     def command_joint_pos(self, joint_pos: np.ndarray) -> None:
         """Command the leader robot to a given state.
@@ -664,6 +679,7 @@ class MotorChainRobot(Robot):
         Args:
             joint_pos (np.ndarray): The state to command the leader robot to.
         """
+        self._require_finite(pos=joint_pos)
         pos = self._clip_robot_joint_pos_command(joint_pos)
         with self._command_lock:
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))
@@ -677,16 +693,22 @@ class MotorChainRobot(Robot):
         Args:
             joint_state (Dict[str, np.ndarray]): The state to command the leader robot to.
         """
+        self._require_finite(
+            pos=joint_state["pos"], vel=joint_state["vel"], kp=joint_state.get("kp"), kd=joint_state.get("kd")
+        )
         pos = self._clip_robot_joint_pos_command(joint_state["pos"])
         vel = joint_state["vel"]
-        self._commands = JointCommands.init_all_zero(len(self.motor_chain))
+        # Built aside and swapped in under the lock: assigning self._commands before taking it let the
+        # control loop pick up a half-built command.
+        commands = JointCommands.init_all_zero(len(self.motor_chain))
         kp = joint_state.get("kp", self._kp)
         kd = joint_state.get("kd", self._kd)
         with self._command_lock:
-            self._commands.pos = self._joint_to_motor_pos(self.remapper.to_robot_joint_pos_space(pos))
-            self._commands.vel = self._joint_to_motor_vel(self.remapper.to_robot_joint_vel_space(vel))
-            self._commands.kp = kp
-            self._commands.kd = kd
+            commands.pos = self._joint_to_motor_pos(self.remapper.to_robot_joint_pos_space(pos))
+            commands.vel = self._joint_to_motor_vel(self.remapper.to_robot_joint_vel_space(vel))
+            commands.kp = kp
+            commands.kd = kd
+            self._commands = commands
 
     def zero_torque_mode(self) -> None:
         logging.info(f"Entering zero_torque_mode for {self}")
@@ -762,16 +784,27 @@ class MotorChainRobot(Robot):
             self.command_joint_pos(target_pos)
             time.sleep(time_interval_s / steps)
 
-    def close(self) -> None:
-        """Safely close the robot by setting all torques to zero."""
-        # self.move_to_zero()
+    def close(self, disable_gripper: bool = False) -> None:
+        """Stop the control loop and close the motor chain.
+
+        This stops sending: it does not zero any torque. Every motor keeps executing its last frame
+        until its CAN timeout, if it has one -- an arm keeps holding its pose. With
+        ``disable_gripper`` the gripper motor is disabled as well, so it goes limp and the next
+        launch finds it in the same state as after a fresh power-up.
+        """
         self._stop_event.set()  # Signal the thread to stop
         self._server_thread.join()  # Wait for the thread to finish
+        disable = []
+        if disable_gripper and self._gripper_index is not None:
+            disable = [self.motor_chain.motor_list[self._gripper_index][0]]
         try:
-            self.motor_chain.close()
+            if disable:
+                self.motor_chain.close(disable_motor_ids=disable)
+            else:
+                self.motor_chain.close()
         finally:
             self.stop_mcap_recording()
-        print("Robot closed with all torques set to zero.")
+        print("Robot closed: commands stopped" + ("; gripper motor disabled." if disable else "."))
 
     def update_kp_kd(self, kp: np.ndarray, kd: np.ndarray) -> None:
         assert kp.shape == self._kp.shape == kd.shape

@@ -957,6 +957,7 @@ def detect_gripper_limits(
     max_duration: float = 2.0,
     position_threshold: float = 0.01,
     check_interval: float = 0.1,
+    min_stroke: float = 0.5,
 ) -> Tuple[float, float]:
     """
     Detect gripper limits by applying test torques and monitoring position changes.
@@ -971,6 +972,7 @@ def detect_gripper_limits(
         max_duration: Maximum test duration for each direction (s)
         position_threshold: Minimum position change to consider motor still moving (rad)
         check_interval: Time interval between checks (s)
+        min_stroke: Least travel between the detected stops (rad) accepted as a calibration
 
     Returns:
         List of detected limits [limit1, limit2]
@@ -1022,6 +1024,12 @@ def detect_gripper_limits(
                 kd=hold_kd,
             )
             time.sleep(check_interval)
+            # A dead control loop sends nothing and returns its last state forever, so the sweep
+            # would "find" both stops at the starting angle; refuse instead.
+            if not getattr(motor_chain, "running", True):
+                raise RuntimeError(
+                    "gripper calibration: the motor chain stopped (see the motor error above); no limits detected"
+                )
 
             states = motor_chain.read_states()
             current_pos = states[gripper_index].pos
@@ -1047,6 +1055,14 @@ def detect_gripper_limits(
     # Calculate detected limits
     min_pos = min(positions)
     max_pos = max(positions)
+    # Every gripper's stroke is several radians at the motor (the crank's ~2.8, the linear ones'
+    # ~6.6). Far less means the gripper never moved -- blocked, unpowered or disabled -- and zero
+    # would make the normalized gripper position divide by zero.
+    if max_pos - min_pos < min_stroke:
+        raise RuntimeError(
+            f"gripper calibration saw only {max_pos - min_pos:.3f} rad of travel (need {min_stroke}): "
+            "is the gripper free to move, powered and enabled?"
+        )
 
     # Order based on motor direction
     if motor_direction > 0:

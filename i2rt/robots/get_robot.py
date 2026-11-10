@@ -72,6 +72,21 @@ def get_encoder_chain(can_interface: CanInterface) -> EncoderChain:
     return EncoderChain([0x50E], passive_encoder_reader)
 
 
+def _close_chain_if_unbuilt(motor_chain: DMChainCanInterface) -> None:
+    """Close a chain whose robot never got built, so no orphaned thread keeps commanding its motors.
+
+    Called on *any* failure after the chain exists -- an exception, or Ctrl+C during the seconds of
+    enable and gripper calibration. Without it the chain's (non-daemon) thread outlives the failure:
+    the process cannot exit, holds the bus, and keeps sending the last frame (during calibration, a
+    test torque into a hard stop), so the next launch shares the bus with it.
+    """
+    logger.error("robot construction failed or was interrupted; closing its motor chain")
+    try:
+        motor_chain.close()
+    except Exception:
+        logger.exception("closing the motor chain failed too")
+
+
 def _get_teaching_handle_robot(
     channel: str = "can0",
     gripper_type: GripperType = GripperType.YAM_TEACHING_HANDLE_V1,
@@ -171,20 +186,24 @@ def _get_gripper_only_robot(
         check_motor_config=True,
     )
 
-    return MotorChainRobot(
-        motor_chain=motor_chain,
-        xml_path=xml_path,
-        use_gravity_comp=False,
-        joint_limits=None,
-        kp=np.array([gripper_kp]),
-        kd=np.array([gripper_kd]),
-        gripper_index=0,
-        gripper_limits=gripper_limits,
-        enable_gripper_calibration=gripper_needs_cal,
-        gripper_type=gripper_type,
-        arm_type=nominal_arm,
-        zero_gravity_mode=False,
-    )
+    try:
+        return MotorChainRobot(
+            motor_chain=motor_chain,
+            xml_path=xml_path,
+            use_gravity_comp=False,
+            joint_limits=None,
+            kp=np.array([gripper_kp]),
+            kd=np.array([gripper_kd]),
+            gripper_index=0,
+            gripper_limits=gripper_limits,
+            enable_gripper_calibration=gripper_needs_cal,
+            gripper_type=gripper_type,
+            arm_type=nominal_arm,
+            zero_gravity_mode=False,
+        )
+    except BaseException:
+        _close_chain_if_unbuilt(motor_chain)
+        raise
 
 
 def get_yam_robot(
@@ -330,49 +349,55 @@ def get_yam_robot(
         # The arm config's motor_registers (e.g. KT_Value/GREF on a 7-DOF arm); arm motors only.
         expected_registers=hw.motor_registers,
     )
-    motor_states = motor_chain.read_states()
-    logging.debug(f"motor_states: {motor_states}")
+    # Everything from here until the robot exists runs with the chain's motors enabled; see
+    # _close_chain_if_unbuilt for why a failure in between must close the chain.
+    try:
+        motor_states = motor_chain.read_states()
+        logging.debug(f"motor_states: {motor_states}")
 
-    logging.info(f"current_pos: {[m.pos for m in motor_states]}")
-    for idx, state in enumerate(motor_states):
-        step = wrap_around_offset(state.pos, motor_chain.motor_direction[idx])
-        if step:
-            logging.info(f"motor {idx} pos={state.pos:.3f}, offset {step:+.3f}")
-            motor_chain.motor_offset[idx] += step
+        logging.info(f"current_pos: {[m.pos for m in motor_states]}")
+        for idx, state in enumerate(motor_states):
+            step = wrap_around_offset(state.pos, motor_chain.motor_direction[idx])
+            if step:
+                logging.info(f"motor {idx} pos={state.pos:.3f}, offset {step:+.3f}")
+                motor_chain.motor_offset[idx] += step
 
-    logging.info(f"adjusted motor_offsets: {motor_chain.motor_offset.tolist()}")
+        logging.info(f"adjusted motor_offsets: {motor_chain.motor_offset.tolist()}")
 
-    # Start the control thread with corrected offsets.
-    motor_chain.start_thread()
-    logging.info(f"YAM initial motor_states: {motor_chain.read_states()}")
+        # Start the control thread with corrected offsets.
+        motor_chain.start_thread()
+        logging.info(f"YAM initial motor_states: {motor_chain.read_states()}")
 
-    get_robot = partial(
-        MotorChainRobot,
-        motor_chain=motor_chain,
-        xml_path=model_path,
-        use_gravity_comp=True,
-        gravity_comp_factor=effective_gravity_comp,
-        joint_limits=joint_limits,
-        kp=kp,
-        kd=kd,
-        grav_comp_kd=grav_comp_kd,
-        coulomb_friction=coulomb_friction,
-        use_coulomb_friction=use_coulomb_friction,
-        zero_gravity_mode=zero_gravity_mode,
-        # Both on the shared builder, so a gripperless arm (no_gripper, a teaching handle) keeps its
-        # identity and its linkages too -- dropping them silently runs a linkage joint as direct drive.
-        arm_type=arm_type,
-        transmissions=hw.transmissions,
-        joint_state_saver_factory=joint_state_saver_factory,
-        set_realtime_and_pin_callback=set_realtime_and_pin_callback,
-    )
-
-    if with_gripper:
-        return get_robot(
-            gripper_index=n_arm_joints,
-            gripper_limits=gripper_limits,
-            enable_gripper_calibration=gripper_needs_cal,
-            gripper_type=gripper_type,
-            limit_gripper_force=50.0,
+        get_robot = partial(
+            MotorChainRobot,
+            motor_chain=motor_chain,
+            xml_path=model_path,
+            use_gravity_comp=True,
+            gravity_comp_factor=effective_gravity_comp,
+            joint_limits=joint_limits,
+            kp=kp,
+            kd=kd,
+            grav_comp_kd=grav_comp_kd,
+            coulomb_friction=coulomb_friction,
+            use_coulomb_friction=use_coulomb_friction,
+            zero_gravity_mode=zero_gravity_mode,
+            # Both on the shared builder, so a gripperless arm (no_gripper, a teaching handle) keeps its
+            # identity and its linkages too -- dropping them silently runs a linkage joint as direct drive.
+            arm_type=arm_type,
+            transmissions=hw.transmissions,
+            joint_state_saver_factory=joint_state_saver_factory,
+            set_realtime_and_pin_callback=set_realtime_and_pin_callback,
         )
-    return get_robot()
+
+        if with_gripper:
+            return get_robot(
+                gripper_index=n_arm_joints,
+                gripper_limits=gripper_limits,
+                enable_gripper_calibration=gripper_needs_cal,
+                gripper_type=gripper_type,
+                limit_gripper_force=50.0,
+            )
+        return get_robot()
+    except BaseException:
+        _close_chain_if_unbuilt(motor_chain)
+        raise
