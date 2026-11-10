@@ -65,3 +65,71 @@ Measured on one linear_4310 (on a yam_ultra_2), with jaw travel taken by caliper
   close at about one stroke per second.
 - **Crank gripper:** near fully open the crank's force-to-torque factor approaches zero, so it barely
   starts closing from there. Close it a little in Position mode first.
+
+## Characterizing the gripper's dynamics
+
+`characterize_gripper.py` measures how the gripper actually responds to torque, and fits a model.
+**Run it with the jaws free; nothing may be between them.** The gripper moves on its own between
+trials.
+
+```bash
+python examples/gripper_force_control/characterize_gripper.py --channel can0
+python examples/gripper_force_control/characterize_gripper.py --channel can0 --arm yam_ultra_2
+```
+
+The default run takes about 3 minutes and does two experiments:
+
+1. **Breakaway.** From rest at 30 %, 50 % and 70 % of the stroke, in both directions, 3 times
+   each, the motor torque ramps up from 0 at 0.2 Nm/s until the jaws move. The torque at that
+   moment is the static friction. Its spread across positions, directions and repeats is what makes
+   the starting threshold vary.
+2. **Torque steps.** A constant torque (0.2 to 0.5 Nm by default) drives the jaws from one end of
+   the free stroke to the other, in both directions, 3 times each. The fit uses the line
+   `speed = (torque - moving friction) / (viscous damping + kd)`; the rise time to that speed gives
+   the inertia.
+
+Two more experiments run on request, with `--experiments` choosing which run, in order:
+
+```bash
+python examples/gripper_force_control/characterize_gripper.py --channel can0 --experiments sweep jaw_travel
+```
+
+3. **Breakaway sweep** (`sweep`, about 3.5 minutes). The breakaway ramp at 21 positions from 15 %
+   to 85 % of the stroke, in both directions. Each position is approached from the far side, so the
+   mechanism's slack is already taken up in the test direction. Each position's two thresholds
+   split into **friction** (their average) and a position-dependent **offset** (half their
+   difference; positive means something pushes the jaws open). The fit also reports whether the
+   offset repeats with motor angle, which would point to motor cogging. `--sweep-points`,
+   `--sweep-range` and `--sweep-repeats` set its density.
+4. **Jaw travel** (`jaw_travel`, interactive; have calipers ready). The jaws are held at 5, 25, 50,
+   75 and 95 % of the stroke, and you type in the gap you measure between the jaw faces, in mm. The
+   measured mm per motor radian is the real force-to-torque ratio. The fit compares it with the
+   gripper config's force map (`force_map_error` > 0 means real forces run high, < 0 low) and
+   suggests corrected `gripper_stroke` / `motor_stroke` values. Nothing may be between the jaws
+   for the sweep, but this step needs the calipers between them.
+
+Compare a run with its fitted model, with plots:
+
+```bash
+uv run --with matplotlib python examples/gripper_force_control/compare_gripper_model.py gripper_characterization/<run>
+```
+
+Results land in `gripper_characterization/<gripper>_<time>/`:
+
+| File | Contents |
+|---|---|
+| `samples.csv` | every sample of every trial: time, position, velocity, measured and commanded torque |
+| `trials.csv` | one row per trial: breakaway torque, or steady speed, rise time, speed-limited flag |
+| `fit.json` | breakaway statistics per direction; moving friction, viscous damping and inertia per direction; the sweep's friction and offset; the jaw travel's force-map check |
+| `meta.json` | the setup: limits, stroke, force-mode `kd`, and every argument |
+
+Things to know:
+
+- **A step below the breakaway torque does nothing.** It's reported as "did not reach the end" and
+  left out of the fit. If that happens, pass higher `--step-torques`.
+- **Trials that hit the speed limit are flagged and left out of the fit**, since the limit cuts
+  the torque that was actually applied.
+- **The inertia depends on sampling.** It comes from a rise of a few milliseconds. `rise_samples` in
+  `trials.csv` says how many samples it spanned; below about 3, treat the inertia as an order of
+  magnitude only.
+- Ctrl+C stops the run, keeps the trials that finished and releases the gripper.

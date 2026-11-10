@@ -1,6 +1,6 @@
 """Start and stop a hardware gripper session so the motor is let go and the process can exit.
 
-Used by ``gripper_force_control.py``, and meant for any other hardware script in this folder.
+Used by ``gripper_force_control.py`` and ``characterize_gripper.py``.
 Three things go wrong otherwise:
 
 * ``close()`` only stops sending. The motor keeps executing its last frame until its CAN timeout
