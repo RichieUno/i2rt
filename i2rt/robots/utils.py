@@ -17,6 +17,7 @@ import yaml
 
 from i2rt.motor_drivers.dm_driver import DMChainCanInterface
 from i2rt.robots.four_bar import FourBarLinkage
+from i2rt.robots.gripper_force_control import GripperForceControlParams
 
 I2RT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
@@ -39,6 +40,7 @@ class _GripperHWConfig:
     needs_calibration: bool
     motor_direction: int  # motor polarity for the gripper (+1 or -1)
     limiter_params: Optional[dict]  # raw limiter section from YAML
+    force_control_params: Optional[dict]  # raw force_control section from YAML (torque-mode envelope)
     # Where the gripper bolts *within* the mount frame. Identity on every YAM arm, whose last
     # joint is the tool roll and whose grippers therefore mount coaxially on it. An arm whose last
     # joint is a wrist pitch carries the gripper off that axis, which the mount pose cannot express
@@ -109,6 +111,7 @@ def _load_gripper_config(gripper_type_value: str, arm_type: "ArmType") -> _Gripp
         needs_calibration=bool(raw["needs_calibration"]),
         motor_direction=int(raw.get("motor_direction", 1)),
         limiter_params=raw.get("limiter"),
+        force_control_params=raw.get("force_control"),
         gripper_pos=j_mount.get("gripper_pos"),
         gripper_quat=j_mount.get("gripper_quat"),
     )
@@ -120,6 +123,7 @@ def _load_gripper_config(gripper_type_value: str, arm_type: "ArmType") -> _Gripp
     logger.info(f"  needs_calibration:   {cfg.needs_calibration}")
     logger.info(f"  motor_direction:     {cfg.motor_direction}")
     logger.info(f"  limiter_params:      {cfg.limiter_params}")
+    logger.info(f"  force_control:       {cfg.force_control_params}")
 
     return cfg
 
@@ -661,6 +665,17 @@ class GripperType(enum.Enum):
         cfg = _load_gripper_config(self.value, arm_type)
         return cfg.motor_direction
 
+    def get_force_control_params(self, arm_type: "ArmType") -> Optional[GripperForceControlParams]:
+        """The torque-control safety envelope, or None if this gripper does not support force control.
+
+        Force control needs the limiter's force -> torque map as well, so a config without a
+        ``limiter`` block has none even if it carries a ``force_control`` block.
+        """
+        cfg = _load_gripper_config(self.value, arm_type)
+        if cfg.force_control_params is None or cfg.limiter_params is None:
+            return None
+        return GripperForceControlParams(**cfg.force_control_params)
+
     def get_gripper_limiter_params(self, arm_type: "ArmType") -> tuple[float, float, float, callable]:
         """
         clog_force_threshold: float,
@@ -891,6 +906,15 @@ class GripperForceLimiter:
             gripper_force=self.max_force,
         )
 
+    def reset(self) -> None:
+        """Forget the clog state, for re-entering position mode after the gripper was torque-controlled.
+
+        Its clogged branch steers from ``last_command_qpos`` and its own smoothed target, both of
+        which describe whatever position command preceded the torque-controlled stretch.
+        """
+        self._is_clogged = False
+        self._gripper_adjusted_qpos = None
+
     def compute_target_gripper_torque(self, gripper_state: Dict[str, float]) -> float:
         current_speed = gripper_state["current_qvel"]
         relevant_history_effort = self._past_gripper_effort_buffer.get_recent_values(self.average_torque_window)
@@ -957,6 +981,7 @@ def detect_gripper_limits(
     max_duration: float = 2.0,
     position_threshold: float = 0.01,
     check_interval: float = 0.1,
+    min_stroke: float = 0.5,
 ) -> Tuple[float, float]:
     """
     Detect gripper limits by applying test torques and monitoring position changes.
@@ -971,6 +996,7 @@ def detect_gripper_limits(
         max_duration: Maximum test duration for each direction (s)
         position_threshold: Minimum position change to consider motor still moving (rad)
         check_interval: Time interval between checks (s)
+        min_stroke: Least travel between the detected stops (rad) accepted as a calibration
 
     Returns:
         List of detected limits [limit1, limit2]
@@ -1022,6 +1048,12 @@ def detect_gripper_limits(
                 kd=hold_kd,
             )
             time.sleep(check_interval)
+            # A dead control loop sends nothing and returns its last state forever, so the sweep
+            # would "find" both stops at the starting angle; refuse instead.
+            if not getattr(motor_chain, "running", True):
+                raise RuntimeError(
+                    "gripper calibration: the motor chain stopped (see the motor error above); no limits detected"
+                )
 
             states = motor_chain.read_states()
             current_pos = states[gripper_index].pos
@@ -1047,6 +1079,14 @@ def detect_gripper_limits(
     # Calculate detected limits
     min_pos = min(positions)
     max_pos = max(positions)
+    # Every gripper's stroke is several radians at the motor (the crank's ~2.8, the linear ones'
+    # ~6.6). Far less means the gripper never moved -- blocked, unpowered or disabled -- and zero
+    # would make the normalized gripper position divide by zero.
+    if max_pos - min_pos < min_stroke:
+        raise RuntimeError(
+            f"gripper calibration saw only {max_pos - min_pos:.3f} rad of travel (need {min_stroke}): "
+            "is the gripper free to move, powered and enabled?"
+        )
 
     # Order based on motor direction
     if motor_direction > 0:

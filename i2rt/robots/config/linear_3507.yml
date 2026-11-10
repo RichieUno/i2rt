@@ -59,3 +59,13 @@ limiter:
   force_torque_map: "linear"
   motor_stroke: 6.57
   gripper_stroke: 0.096
+
+# Torque/force control envelope (MotorChainRobot.command_joint_state with "gripper_force").
+# Force is mapped to motor torque through the limiter's force_torque_map above.
+force_control:
+  max_force: 50.0      # N, commands are clamped to +-this
+  max_torque: 1.5      # Nm at the motor, clamp after the force map
+  wall_margin: 0.05    # normalized stroke: torque toward a stop tapers to zero over this band
+  max_speed: 2.0       # normalized stroke / s: torque along the motion is zero at twice this
+  kd: 0.05             # Nm s/rad. Pure damping at kp = 0: the position-mode kd (0.5) eats most of the
+                       # torque once the jaws move. The speed limit, not kd, guards against overspeed.

@@ -577,6 +577,7 @@ class DMChainCanInterface(MotorChain):
             return
         logging.info("starting separate thread for control loop")
         thread = threading.Thread(target=self._set_torques_and_update_state)
+        self._control_thread = thread  # close() waits for it before closing the bus under it
         thread.start()
         self.start_thread_flag = True
         time.sleep(0.1)
@@ -790,8 +791,30 @@ class DMChainCanInterface(MotorChain):
         with self.same_bus_device_lock:
             return self.same_bus_device_states
 
-    def close(self) -> None:
+    def close(self, disable_motor_ids: Sequence[int] = ()) -> None:
+        """Stop the control loop, wait for it to finish its frame, optionally disable motors, close the bus.
+
+        Closing the socket first left the loop mid-send on a dead file descriptor, so every abrupt
+        exit ended in a spurious "motor failed" error and a traceback from the control thread.
+
+        Without ``disable_motor_ids`` every motor keeps executing its last frame after close, as it
+        always has. A motor listed there is disabled once the loop has stopped -- which works even if
+        the loop died, since the bus is still open. A gripper left enabled this way made the next
+        launch fail: it reported "disabled" on its first control frame, which a gripper that starts
+        out disabled (fresh power-up, or after ``ping_motors.py``) never does.
+        """
         self.running = False
+        thread: Optional[threading.Thread] = getattr(self, "_control_thread", None)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                logging.warning(f"{self}: control loop did not stop within 1 s; closing the bus anyway")
+        for motor_id in disable_motor_ids:
+            try:
+                self.motor_interface.motor_off(motor_id)
+                logging.info(f"{self}: motor {motor_id:#x} disabled")
+            except Exception:
+                logging.exception(f"{self}: could not disable motor {motor_id:#x}; it keeps its last frame")
         self.motor_interface.close()
 
 
