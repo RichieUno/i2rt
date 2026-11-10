@@ -15,6 +15,13 @@ from i2rt.motor_drivers.dm_driver import (
     PassiveEncoderInfo,
 )
 from i2rt.robots.four_bar import FourBarLinkage
+from i2rt.robots.gripper_force_control import (
+    ForceTorqueMap,
+    GripperForceControlParams,
+    GripperForceRequest,
+    estimate_grip_force,
+    gripper_force_torque,
+)
 from i2rt.robots.robot import Robot
 from i2rt.robots.utils import (
     ArmName,
@@ -63,6 +70,9 @@ class JointCommands:
     kd: np.ndarray
 
     indices: Optional[List[int]] = None
+    # Set when this command torque-controls the gripper: its pos/vel/kp/kd entries for the gripper
+    # are then ignored and ``update()`` sends the request's torque with kp = 0. None is position mode.
+    gripper_force_request: Optional[GripperForceRequest] = None
 
     @classmethod
     def init_all_zero(cls, n_joints: int) -> "JointCommands":
@@ -83,6 +93,15 @@ class MotorChainRobot(Robot):
     # rebinds this from its ``transmissions`` argument. Declared on the class so the conversion is a
     # no-op by default and never an AttributeError; never mutated.
     _transmissions: Dict[int, FourBarLinkage] = {}
+
+    # Gripper torque control. On the class for the same reason as ``_transmissions``: a robot without
+    # a gripper (or a test fixture built with ``__new__``) has force control off, never missing.
+    _gripper_force_params: Optional[GripperForceControlParams] = None
+    _gripper_force_map: Optional[ForceTorqueMap] = None
+    # Two copies of "is the gripper torque-controlled", one per thread: the command side's drives the
+    # warning when a command drops force control, the loop side's resets the position limiter.
+    _gripper_force_commanded: bool = False
+    _gripper_force_in_loop: bool = False
 
     def __init__(
         self,
@@ -238,6 +257,10 @@ class MotorChainRobot(Robot):
                 total_dofs=len(motor_chain),
             )
 
+            self._gripper_force_params = gripper_type.get_force_control_params(arm_type)
+            if self._gripper_force_params is not None:
+                self._gripper_force_map = gripper_type.get_gripper_limiter_params(arm_type)[3]
+
         self._joint_limits: Optional[np.ndarray] = None
         if xml_path is not None:
             self.xml_path = os.path.expanduser(xml_path)
@@ -361,6 +384,7 @@ class MotorChainRobot(Robot):
         }
         if self._gripper_index is not None:
             info["limit_gripper_effort"] = self._limit_gripper_force
+            info["gripper_force_control"] = self._gripper_force_params
         return info
 
     def start_server(self) -> None:
@@ -406,6 +430,13 @@ class MotorChainRobot(Robot):
                 self._coulomb_friction * np.sign(self._joint_state.vel) if self.use_coulomb_friction else 0.0
             )
             motor_torques = joint_commands.torques + g * self.gravity_comp_factor + friction_comp
+            force_request = joint_commands.gripper_force_request if self._gripper_index is not None else None
+            if self._gripper_index is not None:
+                self._sync_gripper_loop_mode(force_request is not None)
+            if force_request is not None:
+                # Replaces, not adds: the gripper's gravity and friction terms are zero anyway, and the
+                # request is the gripper's whole command.
+                motor_torques[self._gripper_index] = self._gripper_force_torque(force_request)
             # Everything summed above is a torque on the *joint*: the caller's commanded torque, the
             # model's gravity term and the friction term alike. Behind a linkage the motor sees that
             # scaled by the transmission ratio -- on joint6 a ~30% correction mid-travel, and ~7x
@@ -417,7 +448,16 @@ class MotorChainRobot(Robot):
             self._last_motor_torques = motor_torques.copy()
 
             if self._gripper_index is not None:
-                if self._limit_gripper_force > 0 and self._joint_state is not None:
+                if force_request is not None:
+                    # kp = 0 makes the torque above the whole command. The target is the current position,
+                    # so the frame stays coherent and the limiter has somewhere sane to start from if the
+                    # next command is a position one; the clip below keeps it inside the stops either way.
+                    gi = self._gripper_index
+                    joint_commands.pos[gi] = self.remapper.to_robot_joint_pos_space(self._joint_state.pos)[gi]
+                    joint_commands.vel[gi] = 0.0
+                    joint_commands.kp[gi] = 0.0
+                    joint_commands.kd[gi] = self._gripper_force_kd()
+                elif self._limit_gripper_force > 0 and self._joint_state is not None:
                     # Get current gripper state in raw robot joint pos space
                     gripper_state = {
                         "target_qpos": joint_commands.pos[self._gripper_index],
@@ -443,6 +483,86 @@ class MotorChainRobot(Robot):
                 )
                 self._last_gripper_command_qpos = joint_commands.pos[self._gripper_index]
             self._update_joint_state(motor_torques, joint_commands)
+
+    # ----------------- Gripper torque control ----------------- #
+
+    def _gripper_force_kd(self) -> float:
+        """MIT damping on the gripper motor while it is torque-controlled."""
+        assert self._gripper_force_params is not None and self._gripper_index is not None
+        kd = self._gripper_force_params.kd
+        return float(self._kd[self._gripper_index] if kd is None else kd)
+
+    def _gripper_force_torque(self, request: GripperForceRequest) -> float:
+        """This cycle's gripper motor torque for ``request``, with every guard applied. Holds ``_state_lock``."""
+        assert self._gripper_index is not None and self._gripper_force_params is not None
+        assert self._gripper_force_map is not None and self._gripper_limits is not None
+        gi = self._gripper_index
+        return gripper_force_torque(
+            request,
+            s=float(self._joint_state.pos[gi]),
+            s_dot=float(self._joint_state.vel[gi]),
+            raw_pos=float(self.remapper.to_robot_joint_pos_space(self._joint_state.pos)[gi]),
+            raw_limits=np.asarray(self._gripper_limits, dtype=float),
+            force_torque_map=self._gripper_force_map,
+            params=self._gripper_force_params,
+        )
+
+    def _sync_gripper_loop_mode(self, force_active: bool) -> None:
+        """Loop side of a mode change: re-arm the position limiter when force control ends."""
+        if self._gripper_force_in_loop and not force_active and self._gripper_force_limiter is not None:
+            self._gripper_force_limiter.reset()
+        self._gripper_force_in_loop = force_active
+
+    def _note_gripper_command(self, request: Optional[GripperForceRequest], source: str) -> None:
+        """Command side of a mode change. Holds ``_command_lock``.
+
+        Under stateless commands a call that forgets ``gripper_force`` silently hands the gripper back
+        to position control, at whatever gripper target that call happened to carry -- which on a
+        gripper holding an object can mean a jump or a release. Logged as a warning so an unintended
+        switch shows up; a deliberate one costs one log line.
+        """
+        if self._gripper_index is None:
+            return
+        if self._gripper_force_commanded and request is None:
+            logging.warning(
+                f"{self}: {source} carries no gripper_force/gripper_torque, so the gripper leaves force "
+                f"control for position control at its commanded target. If it is holding an object it may "
+                f"jump or release it."
+            )
+        self._gripper_force_commanded = request is not None
+
+    def _parse_gripper_force_request(self, joint_state: Dict[str, Any]) -> Optional[GripperForceRequest]:
+        """The ``gripper_force`` (N) / ``gripper_torque`` (Nm) key of a command, or None if it has neither."""
+        force = joint_state.get("gripper_force")
+        torque = joint_state.get("gripper_torque")
+        if force is None and torque is None:
+            return None
+        if self._gripper_index is None:
+            raise ValueError(f"{self}: gripper_force/gripper_torque given, but this robot has no gripper")
+        if self._gripper_force_params is None:
+            raise ValueError(
+                f"{self}: {self._gripper_type.value} has no force_control config; cannot torque-control it"
+            )
+        return GripperForceRequest(
+            force_n=None if force is None else float(np.asarray(force).reshape(-1)[0]),
+            torque_nm=None if torque is None else float(np.asarray(torque).reshape(-1)[0]),
+        )
+
+    def get_gripper_force_estimate(self) -> Optional[float]:
+        """Grip force (N, positive closing) implied by the gripper motor's measured torque, or None.
+
+        Only as good as the gripper's force -> torque map, and it includes friction and damping while
+        the jaws move: read it at a stall on an object.
+        """
+        if self._gripper_index is None or self._gripper_force_map is None or self._gripper_limits is None:
+            return None
+        gi = self._gripper_index
+        with self._state_lock:
+            raw_pos = float(self.remapper.to_robot_joint_pos_space(self._joint_state.pos)[gi])
+            raw_eff = float(self._joint_state.eff[gi])
+        return estimate_grip_force(
+            raw_eff, raw_pos, np.asarray(self._gripper_limits, dtype=float), self._gripper_force_map
+        )
 
     def _update_joint_state(
         self,
@@ -682,6 +802,7 @@ class MotorChainRobot(Robot):
         self._require_finite(pos=joint_pos)
         pos = self._clip_robot_joint_pos_command(joint_pos)
         with self._command_lock:
+            self._note_gripper_command(None, "command_joint_pos")
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))
             self._commands.pos = self._joint_to_motor_pos(self.remapper.to_robot_joint_pos_space(pos))
             self._commands.kp = self._kp
@@ -691,19 +812,28 @@ class MotorChainRobot(Robot):
         """Command the leader robot to a given state.
 
         Args:
-            joint_state (Dict[str, np.ndarray]): The state to command the leader robot to.
+            joint_state (Dict[str, np.ndarray]): The state to command the leader robot to: ``pos`` and
+                ``vel``, optionally ``kp``/``kd``, and optionally **one** of ``gripper_force`` (N) or
+                ``gripper_torque`` (Nm at the motor) -- positive closes. Either one torque-controls
+                the gripper for this command, ignoring its ``pos``/``vel``/``kp``/``kd`` entries, under
+                the clamps, the virtual wall at the stops and the speed limit of the gripper config's
+                ``force_control`` block. Commands are stateless: the next command without the key
+                returns the gripper to position control, which is logged as a warning.
         """
         self._require_finite(
             pos=joint_state["pos"], vel=joint_state["vel"], kp=joint_state.get("kp"), kd=joint_state.get("kd")
         )
+        request = self._parse_gripper_force_request(joint_state)
         pos = self._clip_robot_joint_pos_command(joint_state["pos"])
         vel = joint_state["vel"]
         # Built aside and swapped in under the lock: assigning self._commands before taking it let the
         # control loop pick up a half-built command.
         commands = JointCommands.init_all_zero(len(self.motor_chain))
+        commands.gripper_force_request = request
         kp = joint_state.get("kp", self._kp)
         kd = joint_state.get("kd", self._kd)
         with self._command_lock:
+            self._note_gripper_command(request, "command_joint_state")
             commands.pos = self._joint_to_motor_pos(self.remapper.to_robot_joint_pos_space(pos))
             commands.vel = self._joint_to_motor_vel(self.remapper.to_robot_joint_vel_space(vel))
             commands.kp = kp
@@ -713,6 +843,7 @@ class MotorChainRobot(Robot):
     def zero_torque_mode(self) -> None:
         logging.info(f"Entering zero_torque_mode for {self}")
         with self._command_lock:
+            self._gripper_force_commanded = False
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))
             self._kp = np.zeros(len(self.motor_chain))
             self._kd = np.zeros(len(self.motor_chain))
@@ -826,6 +957,8 @@ class MotorChainRobot(Robot):
         gravity comp and stays off.
         """
         with self._command_lock:
+            # A deliberate exit from gripper force control, so it clears the flag without the warning.
+            self._gripper_force_commanded = False
             self.use_gravity_comp = self._gravity_comp_available
             self.use_coulomb_friction = self._coulomb_friction_configured
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))
@@ -847,6 +980,7 @@ class MotorChainRobot(Robot):
         """
         logging.info(f"{self}: entering zero-torque idle -- nothing is holding the arm")
         with self._command_lock:
+            self._gripper_force_commanded = False
             self.use_gravity_comp = False
             self.use_coulomb_friction = False
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))

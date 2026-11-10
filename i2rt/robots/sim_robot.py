@@ -305,6 +305,10 @@ class SimRobot(Robot):
             self._update_joint_state()
 
     def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> None:
+        # Refused rather than ignored: control mode teleports qpos, so there is no gripper dynamics a
+        # force could act on, and dropping the key would show the jaws obeying a position nobody sent.
+        if joint_state.get("gripper_force") is not None or joint_state.get("gripper_torque") is not None:
+            raise NotImplementedError("SimRobot does not simulate gripper force control; use a MotorChainRobot")
         self.command_joint_pos(joint_state["pos"])
         if "vel" in joint_state:
             self.command_target_vel(joint_state["vel"])
