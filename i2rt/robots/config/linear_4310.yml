@@ -61,7 +61,8 @@ limiter:
   gripper_stroke: 0.096
 
 # Torque/force control envelope (MotorChainRobot.command_joint_state with "gripper_force").
-# Force is mapped to motor torque through the limiter's force_torque_map above.
+# Force is mapped to motor torque through the limiter's linear map above, but over the stroke this
+# gripper calibrates to instead of its motor_stroke (see GripperType.get_force_control_map).
 force_control:
   max_force: 50.0      # N, commands are clamped to +-this
   max_torque: 1.5      # Nm at the motor, clamp after the force map

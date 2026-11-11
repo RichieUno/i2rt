@@ -259,7 +259,10 @@ class MotorChainRobot(Robot):
 
             self._gripper_force_params = gripper_type.get_force_control_params(arm_type)
             if self._gripper_force_params is not None:
-                self._gripper_force_map = gripper_type.get_gripper_limiter_params(arm_type)[3]
+                # Over this gripper's calibrated stroke rather than the config's nominal one; the
+                # position-mode force limiter above keeps the config's map.
+                stroke = abs(float(gripper_limits[1]) - float(gripper_limits[0]))
+                self._gripper_force_map = gripper_type.get_force_control_map(arm_type, calibrated_stroke=stroke)
 
         self._joint_limits: Optional[np.ndarray] = None
         if xml_path is not None:

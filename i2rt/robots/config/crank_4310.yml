@@ -63,7 +63,7 @@ limiter:
   motor_reading_offset: 0.174
 
 # Torque/force control envelope (MotorChainRobot.command_joint_state with "gripper_force").
-# Force is mapped to motor torque through the limiter's force_torque_map above.
+# Force is mapped to motor torque through the limiter's crank map above, unchanged.
 force_control:
   max_force: 50.0      # N, commands are clamped to +-this
   max_torque: 1.5      # Nm at the motor, clamp after the force map
