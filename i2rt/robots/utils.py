@@ -701,13 +701,15 @@ class GripperType(enum.Enum):
                 "force control keeps the config's force map"
             )
             return config_map
+        # The force_control block may override the jaw travel: what the calibrated stroke spans,
+        # which on a linear_4310 is ~92 mm, not the nominal opening the limiter block states.
+        params = self.get_force_control_params(arm_type)
+        jaw_travel = params.gripper_stroke if params and params.gripper_stroke else float(lim["gripper_stroke"])
         logger.info(
-            f"{self.value}: force control maps force over the calibrated stroke {stroke:.3f} rad "
-            f"(nominal {nominal} rad)"
+            f"{self.value}: force control maps {jaw_travel * 1000:.1f} mm of jaw travel over the calibrated "
+            f"stroke {stroke:.3f} rad (nominal {nominal} rad)"
         )
-        return partial(
-            linear_gripper_force_torque_map, motor_stroke=stroke, gripper_stroke=float(lim["gripper_stroke"])
-        )
+        return partial(linear_gripper_force_torque_map, motor_stroke=stroke, gripper_stroke=jaw_travel)
 
     def get_gripper_limiter_params(self, arm_type: "ArmType") -> tuple[float, float, float, callable]:
         """

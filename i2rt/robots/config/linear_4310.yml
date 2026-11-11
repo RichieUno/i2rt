@@ -69,3 +69,6 @@ force_control:
   max_speed: 2.0       # normalized stroke / s: torque along the motion is zero at twice this
   kd: 0.05             # Nm s/rad. Pure damping at kp = 0: the position-mode kd (0.5) eats most of the
                        # torque once the jaws move. The speed limit, not kd, guards against overspeed.
+  gripper_stroke: 0.092  # m of jaw travel between the calibrated stops, for force control only (the
+                         # limiter block's 0.096 is the nominal opening). Measured on one linear_4310 by
+                         # calipers: 18.03 mm per motor rad over a settled calibrated stroke of ~5.10 rad.

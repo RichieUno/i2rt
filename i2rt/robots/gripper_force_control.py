@@ -41,6 +41,9 @@ class GripperForceControlParams:
     wall_margin: float = 0.05  # normalized stroke, the taper zone at each stop
     max_speed: float = 2.0  # normalized stroke / s; torque along the motion is zero at twice this
     kd: Optional[float] = None  # MIT damping on the gripper motor; None = the gripper's own kd
+    # m of jaw travel between the *calibrated* stops, for a linear force map; None = the limiter's
+    # gripper_stroke. Force control only: position mode's force limiter keeps the limiter block's.
+    gripper_stroke: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not self.max_force > 0 or not self.max_torque > 0:
@@ -51,6 +54,8 @@ class GripperForceControlParams:
             raise ValueError(f"max_speed must be positive, got {self.max_speed}")
         if self.kd is not None and self.kd < 0:
             raise ValueError(f"kd must be non-negative, got {self.kd}")
+        if self.gripper_stroke is not None and not self.gripper_stroke > 0:
+            raise ValueError(f"gripper_stroke must be positive, got {self.gripper_stroke}")
 
 
 @dataclass(frozen=True)
