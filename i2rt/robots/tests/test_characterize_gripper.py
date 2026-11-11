@@ -326,3 +326,19 @@ def test_a_twitch_before_breakaway_is_reported_as_first_movement_only(
     # The sustained reading lags the slide's start by the samples it takes to pass SUSTAINED_TOL (a few
     # mNm of ramp here) -- small against the 0.02-0.10 Nm twitch it separates out.
     assert cmd[sustained] == pytest.approx(0.17, abs=0.005)
+
+
+def test_jaw_travel_checks_the_force_control_map_against_the_calipers() -> None:
+    """Force control's map is over the calibrated stroke; with the nominal jaw travel it is right here."""
+    from i2rt.robots.utils import ArmType as _Arm
+    from i2rt.robots.utils import GripperType as _Gripper
+
+    stroke = 5.27
+    true_ratio = 0.096 / stroke
+    config = {"force_torque_map": "linear", "gripper_stroke": 0.096, "motor_stroke": 6.57}
+    pts = [cg.JawPoint(s, s, 6.5 - s * stroke, 1000 * true_ratio * s * stroke) for s in (0.05, 0.5, 0.95)]
+    fc_map = _Gripper.LINEAR_4310.get_force_control_map(_Arm.YAM, calibrated_stroke=stroke)
+    result = cg.analyze_jaw_travel(pts, stroke, _linear_map(0.096 / 6.57), config, force_control_map=fc_map)
+    assert result["force_control_map_error"] == pytest.approx(0.0, abs=1e-9)
+    assert result["force_map_error"] == pytest.approx(stroke / 6.57 - 1.0), "the config map is still reported"
+    assert all(seg["force_control_error"] == pytest.approx(0.0, abs=1e-9) for seg in result["segments"])

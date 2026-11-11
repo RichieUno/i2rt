@@ -105,9 +105,14 @@ python examples/gripper_force_control/characterize_gripper.py --channel can0 --e
    `--sweep-range` and `--sweep-repeats` set its density.
 4. **Jaw travel** (`jaw_travel`, interactive; have calipers ready). The jaws are held at 5, 25, 50,
    75 and 95 % of the stroke, and you type in the gap you measure between the jaw faces, in mm. The
-   measured mm per motor radian is the real force-to-torque ratio. The fit compares it with the
-   gripper config's force map (`force_map_error` > 0 means real forces run high, < 0 low) and
-   suggests corrected `gripper_stroke` / `motor_stroke` values. Nothing may be between the jaws
+   measured mm per motor radian is the real force-to-torque ratio. The fit compares it with both
+   force maps:
+   - `force_control_map_error`: the map force control uses, over the stroke this gripper
+     calibrated to;
+   - `force_map_error`: the gripper config's map, which position mode's force limiter uses.
+
+   For both, > 0 means real forces run high and < 0 low. The fit also suggests corrected
+   `gripper_stroke` / `motor_stroke` values. On its own: `--experiments jaw_travel`. Nothing may be between the jaws
    for the sweep, but this step needs the calipers between them.
 
 Compare a run with its fitted model, with plots:

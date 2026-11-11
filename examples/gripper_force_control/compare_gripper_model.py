@@ -224,6 +224,8 @@ def _extras(fit: Dict[str, Any]) -> Dict[str, Any]:
     if "jaw_travel" in fit:
         jt = fit["jaw_travel"]
         keys = (
+            "force_control_nm_per_n",
+            "force_control_map_error",
             "mm_per_rad",
             "travel_over_calibrated_stroke_mm",
             "linearity_rms_mm",

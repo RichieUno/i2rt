@@ -59,6 +59,7 @@ def is_raspberry_pi() -> bool:
     """True on a Raspberry Pi (ARM), where GPIO is native and no USB-GPIO converter is used."""
     return platform.machine().lower() in _RASPBERRY_PI_MACHINES
 
+
 # Polling cadence for the add_event_detect emulation (≫ faster than the 50 ms
 # debounce and the homing loop's 10 ms tick, so limit hits are caught promptly).
 POLL_INTERVAL_S = 0.005
@@ -337,8 +338,7 @@ class UsbGpioBackend:
                 except UsbToGpioError as e:
                     error = e
             logger.warning(
-                f"USB-GPIO output(pin={pin}, ch={ch}, level={int(target)}) not confirmed by echo "
-                f"after resend: {error}"
+                f"USB-GPIO output(pin={pin}, ch={ch}, level={int(target)}) not confirmed by echo after resend: {error}"
             )
 
     def input(self, pin: int) -> int:

@@ -195,13 +195,21 @@ class JawPoint:
 
 
 def analyze_jaw_travel(
-    points: List[JawPoint], stroke_rad: float, force_map: Callable[..., float], config: Dict[str, Any]
+    points: List[JawPoint],
+    stroke_rad: float,
+    force_map: Callable[..., float],
+    config: Dict[str, Any],
+    force_control_map: Optional[Callable[..., float]] = None,
 ) -> Dict[str, Any]:
-    """Measured mm per motor radian against the force map's own ratio.
+    """Measured mm per motor radian against the force maps' own ratios.
 
     By virtual work ``tau * dtheta = F * dx``, so the force-to-torque ratio *is* the jaw travel per
-    motor radian: the map is right exactly when ``|dx/dtheta|`` matches ``map(F=1)``. Compared per
+    motor radian: a map is right exactly when ``|dx/dtheta|`` matches ``map(F=1)``. Compared per
     segment between neighbouring points, which holds for a position-dependent (crank) map as well.
+
+    ``force_map`` is the config's (the one position mode's force limiter uses); ``force_control_map``,
+    if given, is the one force control uses, over the gripper's calibrated stroke. Errors > 0 mean the
+    map asks for too much torque per newton, so real forces run high.
     """
     pts = sorted(points, key=lambda p: p.motor_rad)
     angle = np.array([p.motor_rad for p in pts])
@@ -213,15 +221,17 @@ def analyze_jaw_travel(
         measured = abs((b.gap_mm - a.gap_mm) / 1000.0 / (b.motor_rad - a.motor_rad))
         mid = 0.5 * (a.motor_rad + b.motor_rad)
         assumed = abs(float(force_map(gripper_force=1.0, current_angle=mid)))
-        segments.append(
-            {
-                "from_s": a.s,
-                "to_s": b.s,
-                "measured_nm_per_n": measured,
-                "map_nm_per_n": assumed,
-                "map_error": assumed / measured - 1.0 if measured else None,
-            }
-        )
+        segment = {
+            "from_s": a.s,
+            "to_s": b.s,
+            "measured_nm_per_n": measured,
+            "map_nm_per_n": assumed,
+            "map_error": assumed / measured - 1.0 if measured else None,
+        }
+        if force_control_map is not None:
+            fc = abs(float(force_control_map(gripper_force=1.0, current_angle=mid)))
+            segment.update(force_control_nm_per_n=fc, force_control_error=fc / measured - 1.0 if measured else None)
+        segments.append(segment)
     measured_ratio = abs(float(slope))
     result: Dict[str, Any] = {
         "points": [asdict(p) for p in pts],
@@ -239,6 +249,17 @@ def analyze_jaw_travel(
             # > 0: the config's map asks for too much torque per newton, so real forces run high.
             force_map_error=assumed / measured_ratio - 1.0,
             suggested={"gripper_stroke": round(measured_ratio * stroke_rad, 4), "motor_stroke": round(stroke_rad, 3)},
+        )
+    if force_control_map is not None:
+        errors = [seg["force_control_error"] for seg in segments if seg.get("force_control_error") is not None]
+        mid_angle = float(np.mean(angle))
+        fc_ratio = abs(float(force_control_map(gripper_force=1.0, current_angle=mid_angle)))
+        result.update(
+            force_control_nm_per_n=fc_ratio,
+            # Against the overall slope for a linear map; the mean of the segments' for a crank.
+            force_control_map_error=(fc_ratio / measured_ratio - 1.0)
+            if config.get("force_torque_map") == "linear"
+            else float(np.mean(errors)),
         )
     return result
 
@@ -677,8 +698,24 @@ def main(
                 limiter = gripper_type.get_gripper_limiter_params(
                     ArmType.YAM if arm_type == ArmType.NO_ARM else arm_type
                 )
+                arm_for_config = ArmType.YAM if arm_type == ArmType.NO_ARM else arm_type
                 jaw_travel = analyze_jaw_travel(
-                    points, setup.stroke, limiter[3], _limiter_config(gripper_type, arm_type)
+                    points,
+                    setup.stroke,
+                    limiter[3],
+                    _limiter_config(gripper_type, arm_type),
+                    force_control_map=gripper_type.get_force_control_map(
+                        arm_for_config, calibrated_stroke=setup.stroke
+                    ),
+                )
+                print(
+                    f"[char] jaw travel: {jaw_travel['mm_per_rad']:.2f} mm/rad measured; "
+                    f"force-control map {100 * jaw_travel['force_control_map_error']:+.1f} %"
+                    + (
+                        f", config map (position mode) {100 * jaw_travel['force_map_error']:+.1f} %"
+                        if "force_map_error" in jaw_travel
+                        else ""
+                    )
                 )
             _move_to(robot, setup, 0.5)
     except KeyboardInterrupt:
