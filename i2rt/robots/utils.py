@@ -982,6 +982,7 @@ def detect_gripper_limits(
     position_threshold: float = 0.01,
     check_interval: float = 0.1,
     min_stroke: float = 0.5,
+    settle_time: float = 0.25,
 ) -> Tuple[float, float]:
     """
     Detect gripper limits by applying test torques and monitoring position changes.
@@ -997,12 +998,20 @@ def detect_gripper_limits(
         position_threshold: Minimum position change to consider motor still moving (rad)
         check_interval: Time interval between checks (s)
         min_stroke: Least travel between the detected stops (rad) accepted as a calibration
+        settle_time: How long to keep pushing once the gripper has stalled (s); the stop is the mean
+            position over that window
+
+    Each stop is the gripper's *settled* position under the test torque, not the most extreme
+    sample. A linear gripper's closed end is no hard stop but its jaws pressing into each other,
+    and with no damping the jaws arrive there at up to ~20 rad/s and overshoot into that contact
+    before springing back. Taking the most extreme 50 ms sample made the closed end depend on
+    whether a sample happened to catch that overshoot: on one linear_4310 it varied by 0.18 rad
+    (3 mm at the jaws) across startups while the open end, a stiff stop, repeated to 0.0004 rad.
 
     Returns:
         List of detected limits [limit1, limit2]
     """
     logger = logging.getLogger(__name__)
-    positions = []
     num_motors = len(motor_chain.motor_list)
     zero_torques = np.zeros(num_motors)
     assert len(hold_kp) == len(hold_kd) == num_motors, (
@@ -1021,7 +1030,6 @@ def detect_gripper_limits(
     initial_states = motor_chain.read_states()
     initial_positions = np.array([state.pos for state in initial_states])
     initial_pos = initial_positions[gripper_index]
-    positions.append(initial_pos)
     logger.info(f"Gripper calibration starting from position: {initial_pos:.4f}")
 
     # The gripper is the one motor left in pure torque mode, so it can travel to its mechanical stops.
@@ -1030,7 +1038,20 @@ def detect_gripper_limits(
     hold_kp[gripper_index] = 0.0
     hold_kd[gripper_index] = 0.0
 
-    # Test both directions
+    def push_and_read() -> float:
+        """Send the test torque, and read the gripper position back once the chain has acted on it."""
+        motor_chain.set_commands(torques=test_torques, pos=initial_positions, kp=hold_kp, kd=hold_kd)
+        time.sleep(check_interval)
+        # A dead control loop sends nothing and returns its last state forever, so the sweep
+        # would "find" both stops at the starting angle; refuse instead.
+        if not getattr(motor_chain, "running", True):
+            raise RuntimeError(
+                "gripper calibration: the motor chain stopped (see the motor error above); no limits detected"
+            )
+        return float(motor_chain.read_states()[gripper_index].pos)
+
+    # Test both directions; the stop each one reaches lies along +q for +1 and along -q for -1.
+    stops: Dict[int, float] = {}
     for direction in [1, -1]:
         logger.info(f"Testing gripper direction: {direction}")
         test_torques = zero_torques.copy()
@@ -1039,25 +1060,12 @@ def detect_gripper_limits(
         start_time = time.time()
         last_pos = None
         position_stable_count = 0
+        travel = [initial_pos]
+        stalled = False
 
         while time.time() - start_time < max_duration:
-            motor_chain.set_commands(
-                torques=test_torques,
-                pos=initial_positions,
-                kp=hold_kp,
-                kd=hold_kd,
-            )
-            time.sleep(check_interval)
-            # A dead control loop sends nothing and returns its last state forever, so the sweep
-            # would "find" both stops at the starting angle; refuse instead.
-            if not getattr(motor_chain, "running", True):
-                raise RuntimeError(
-                    "gripper calibration: the motor chain stopped (see the motor error above); no limits detected"
-                )
-
-            states = motor_chain.read_states()
-            current_pos = states[gripper_index].pos
-            positions.append(current_pos)
+            current_pos = push_and_read()
+            travel.append(current_pos)
 
             # Check if position has stopped changing (gripper hit limit)
             if last_pos is not None:
@@ -1069,16 +1077,35 @@ def detect_gripper_limits(
 
                 # Check if gripper has hit limit (position stable)
                 if position_stable_count >= 3:
-                    logger.info(f"Gripper limit detected: pos={current_pos:.4f}")
+                    stalled = True
                     break
 
             last_pos = current_pos
 
+        extreme = max(travel) if direction > 0 else min(travel)
+        if stalled:
+            # Keep pushing so the contact reaches its static compression under the test torque.
+            settle_start = time.time()
+            settled = []
+            while time.time() - settle_start < settle_time:
+                settled.append(push_and_read())
+            stops[direction] = float(np.mean(settled))
+            logger.info(
+                f"Gripper limit detected (direction {direction:+d}): settled at {stops[direction]:.4f}, "
+                f"most extreme sample {extreme:.4f} (overshoot {abs(extreme - stops[direction]):.4f} rad)"
+            )
+        else:
+            stops[direction] = extreme
+            logger.warning(
+                f"Gripper calibration (direction {direction:+d}): still moving after {max_duration} s; "
+                f"using the furthest position reached, {extreme:.4f}"
+            )
+
         time.sleep(0.3)
 
     # Calculate detected limits
-    min_pos = min(positions)
-    max_pos = max(positions)
+    min_pos = stops[-1]
+    max_pos = stops[1]
     # Every gripper's stroke is several radians at the motor (the crank's ~2.8, the linear ones'
     # ~6.6). Far less means the gripper never moved -- blocked, unpowered or disabled -- and zero
     # would make the normalized gripper position divide by zero.
