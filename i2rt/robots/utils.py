@@ -676,6 +676,39 @@ class GripperType(enum.Enum):
             return None
         return GripperForceControlParams(**cfg.force_control_params)
 
+    def get_force_control_map(self, arm_type: "ArmType", calibrated_stroke: Optional[float]) -> Callable[..., float]:
+        """The force -> torque map force control uses: the limiter's, but on the stroke this gripper calibrated to.
+
+        A linear map is ``gripper_stroke / motor_stroke`` newtons-to-Nm. The config's ``motor_stroke``
+        is a nominal constant, and on a linear_4310 it was 25 % long (6.57 rad against a calibrated
+        5.25), so forces came out 19 % low; the jaw travel itself (``gripper_stroke``) was within
+        2 %. So force control divides the config's jaw travel by the stroke the gripper's own
+        calibration measured. Position mode's force limiter keeps the config's map untouched.
+
+        Falls back to the config's map for a crank map (whose parameters are angles, not a stroke),
+        without a calibrated stroke, and -- with a warning -- for a stroke outside 60-140 % of the
+        nominal one: a calibration that was blocked short would *raise* the torque per newton.
+        """
+        config_map = self.get_gripper_limiter_params(arm_type)[3]
+        lim = _load_gripper_config(self.value, arm_type).limiter_params or {}
+        if lim.get("force_torque_map") != "linear" or not calibrated_stroke:
+            return config_map
+        nominal = float(lim["motor_stroke"])
+        stroke = abs(float(calibrated_stroke))
+        if not 0.6 * nominal <= stroke <= 1.4 * nominal:
+            logger.warning(
+                f"{self.value}: calibrated stroke {stroke:.3f} rad is far from the nominal {nominal} rad; "
+                "force control keeps the config's force map"
+            )
+            return config_map
+        logger.info(
+            f"{self.value}: force control maps force over the calibrated stroke {stroke:.3f} rad "
+            f"(nominal {nominal} rad)"
+        )
+        return partial(
+            linear_gripper_force_torque_map, motor_stroke=stroke, gripper_stroke=float(lim["gripper_stroke"])
+        )
+
     def get_gripper_limiter_params(self, arm_type: "ArmType") -> tuple[float, float, float, callable]:
         """
         clog_force_threshold: float,

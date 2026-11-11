@@ -344,3 +344,85 @@ def test_a_non_finite_position_command_is_refused() -> None:
     with pytest.raises(ValueError, match="finite"):
         robot.command_joint_pos(np.array([np.nan, 0.5]))
     assert robot._commands is before
+
+
+# ---- the force map over the calibrated stroke ------------------------------------------------
+
+from i2rt.motor_drivers.utils import MotorInfo
+
+NOMINAL_NM_PER_N = 0.096 / 6.57  # linear_4310's limiter block: gripper_stroke / motor_stroke
+
+
+def test_force_control_divides_the_jaw_travel_by_the_calibrated_stroke() -> None:
+    force_map = GripperType.LINEAR_4310.get_force_control_map(ArmType.YAM, calibrated_stroke=5.245)
+    assert force_map(gripper_force=1.0, current_angle=0.0) == pytest.approx(0.096 / 5.245)
+
+
+@pytest.mark.parametrize("stroke", [None, 0.0], ids=["none", "zero"])
+def test_without_a_calibrated_stroke_the_config_map_stands(stroke: Any) -> None:
+    force_map = GripperType.LINEAR_4310.get_force_control_map(ArmType.YAM, calibrated_stroke=stroke)
+    assert force_map(gripper_force=1.0, current_angle=0.0) == pytest.approx(NOMINAL_NM_PER_N)
+
+
+@pytest.mark.parametrize("stroke", [2.0, 12.0], ids=["blocked_short", "too_long"])
+def test_an_implausible_stroke_keeps_the_config_map(stroke: float, caplog: pytest.LogCaptureFixture) -> None:
+    """A calibration blocked short would raise the torque per newton; it must not reach force control."""
+    with caplog.at_level(logging.WARNING):
+        force_map = GripperType.LINEAR_4310.get_force_control_map(ArmType.YAM, calibrated_stroke=stroke)
+    assert force_map(gripper_force=1.0, current_angle=0.0) == pytest.approx(NOMINAL_NM_PER_N)
+    assert any("far from the nominal" in r.getMessage() for r in caplog.records)
+
+
+def test_a_crank_gripper_keeps_its_own_map() -> None:
+    config_map = GripperType.CRANK_4310.get_gripper_limiter_params(ArmType.YAM)[3]
+    force_map = GripperType.CRANK_4310.get_force_control_map(ArmType.YAM, calibrated_stroke=2.8)
+    for angle in (-0.5, -1.5, -2.5):
+        assert force_map(gripper_force=10.0, current_angle=angle) == pytest.approx(
+            config_map(gripper_force=10.0, current_angle=angle)
+        )
+
+
+class _GripperChain:
+    """One gripper motor that holds still: enough for MotorChainRobot to build and run its loop."""
+
+    def __init__(self) -> None:
+        self.motor_list = [[0x07, "DM4310"]]
+        self.motor_direction = np.array([1])
+        self.running = True
+
+    def __len__(self) -> int:
+        return 1
+
+    def read_states(self, torques: Any = None) -> List[MotorInfo]:
+        return [MotorInfo(id=0x07, error_code=1, pos=-2.4, vel=0.0, eff=0.0, timestamp=0.0)]
+
+    def set_commands(self, torques: Any, **_: Any) -> List[MotorInfo]:
+        return self.read_states()
+
+    def close(self, **_: Any) -> None:
+        self.running = False
+
+
+def test_position_mode_keeps_the_config_map_while_force_control_uses_the_calibration() -> None:
+    limits = np.array([0.20237, -5.04215])  # the calibrated [closed, open] of the measured linear_4310
+    robot = MotorChainRobot(
+        motor_chain=cast(Any, _GripperChain()),
+        xml_path=GripperType.LINEAR_4310.get_xml_path(),
+        use_gravity_comp=False,
+        kp=[20.0],
+        kd=[0.5],
+        gripper_index=0,
+        gripper_limits=limits,
+        limit_gripper_force=50.0,
+        gripper_type=GripperType.LINEAR_4310,
+        arm_type=ArmType.YAM,
+        zero_gravity_mode=False,
+    )
+    try:
+        stroke = abs(limits[1] - limits[0])
+        assert robot._gripper_force_map(gripper_force=1.0, current_angle=0.0) == pytest.approx(0.096 / stroke)
+        # The position-mode limiter, built from the limiter block, is untouched: 50 N at the nominal ratio.
+        limiter_torque = robot._gripper_force_limiter.gripper_force_torque_map(current_angle=0.0)
+        assert limiter_torque == pytest.approx(50.0 * NOMINAL_NM_PER_N)
+    finally:
+        robot.close()

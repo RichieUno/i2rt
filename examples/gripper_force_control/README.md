@@ -55,9 +55,11 @@ is an independent measurement of force.
 
 Measured on one linear_4310 (on a yam_ultra_2), with jaw travel taken by calipers:
 
-- **The force map is about 19 % off.** The config assumes 96 mm of jaw travel over 6.57 rad of motor
-  travel. That gripper calibrates to about 5.25 rad, so delivered forces run about 19 % below the
-  command. `flexible_4310` and `linear_3507` use the same constants and were not measured.
+- **The config's force map was about 19 % off.** It assumes 96 mm of jaw travel over 6.57 rad of
+  motor travel; that gripper calibrates to about 5.25 rad, and its jaws travel 94.5 mm. Force
+  control therefore maps force over the stroke each gripper calibrates to (linear grippers;
+  the crank keeps its map), which leaves about 1.5 % from the nominal jaw travel. **Position mode's
+  force limiter still uses the config's map**, so there "50 N" is still about 40 N.
 - **Friction is not compensated.** Starting the jaws took 0.13–0.29 Nm at the motor (about 9–20 N
   commanded), depending on position and on the jaws' previous motion. Below that they don't move,
   and at a standstill the delivered force can sit that much above or below the command.
