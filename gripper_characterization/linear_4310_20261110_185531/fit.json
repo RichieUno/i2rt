@@ -1,0 +1,96 @@
+{
+  "breakaway": {},
+  "steps": {},
+  "jaw_travel": {
+    "points": [
+      {
+        "target_s": 0.95,
+        "s": 0.9487546090751737,
+        "motor_rad": -4.781986724650947,
+        "gap_mm": 86.0
+      },
+      {
+        "target_s": 0.75,
+        "s": 0.7488148092407244,
+        "motor_rad": -3.7684061951628878,
+        "gap_mm": 67.5
+      },
+      {
+        "target_s": 0.5,
+        "s": 0.4992098728271503,
+        "motor_rad": -2.503051804379341,
+        "gap_mm": 45.0
+      },
+      {
+        "target_s": 0.25,
+        "s": 0.24922868537888446,
+        "motor_rad": -1.2357900358587006,
+        "gap_mm": 22.0
+      },
+      {
+        "target_s": 0.05,
+        "s": 0.0513206411317636,
+        "motor_rad": -0.23250934615091445,
+        "gap_mm": 3.8
+      }
+    ],
+    "mm_per_rad": 18.043786373209002,
+    "travel_over_calibrated_stroke_mm": 91.47168578376996,
+    "linearity_rms_mm": 0.11162853161562596,
+    "segments": [
+      {
+        "from_s": 0.9487546090751737,
+        "to_s": 0.7488148092407244,
+        "measured_nm_per_n": 0.01825212645841175,
+        "map_nm_per_n": 0.014611872146118721,
+        "map_error": -0.1994427509905492,
+        "force_control_nm_per_n": 0.0189370456768756,
+        "force_control_error": 0.037525447789575006
+      },
+      {
+        "from_s": 0.7488148092407244,
+        "to_s": 0.4992098728271503,
+        "measured_nm_per_n": 0.017781579740729633,
+        "map_nm_per_n": 0.014611872146118721,
+        "map_error": -0.17825792988181655,
+        "force_control_nm_per_n": 0.0189370456768756,
+        "force_control_error": 0.06498106203124987
+      },
+      {
+        "from_s": 0.4992098728271503,
+        "to_s": 0.24922868537888446,
+        "measured_nm_per_n": 0.018149367850692315,
+        "map_nm_per_n": 0.014611872146118721,
+        "map_error": -0.19491013316139572,
+        "force_control_nm_per_n": 0.0189370456768756,
+        "force_control_error": 0.04339973891450111
+      },
+      {
+        "from_s": 0.24922868537888446,
+        "to_s": 0.0513206411317636,
+        "measured_nm_per_n": 0.018140486692015276,
+        "map_nm_per_n": 0.014611872146118721,
+        "map_error": -0.19451597996263859,
+        "force_control_nm_per_n": 0.0189370456768756,
+        "force_control_error": 0.04391056306173624
+      }
+    ],
+    "config": {
+      "clog_force_threshold": 0.5,
+      "clog_speed_threshold": 0.3,
+      "sign": 1.0,
+      "force_torque_map": "linear",
+      "motor_stroke": 6.57,
+      "gripper_stroke": 0.096
+    },
+    "measured_nm_per_n": 0.018043786373209,
+    "config_nm_per_n": 0.014611872146118721,
+    "force_map_error": -0.19019922737424488,
+    "suggested": {
+      "gripper_stroke": 0.0915,
+      "motor_stroke": 5.069
+    },
+    "force_control_nm_per_n": 0.0189370456768756,
+    "force_control_map_error": 0.049505091957466885
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "gripper": "linear_4310",
+  "arm": "yam_ultra_2",
+  "date": "2026-11-10T18:55:33.623313",
+  "limits_raw_rad": [
+    0.027656977187762166,
+    -5.04177157244221
+  ],
+  "stroke_rad": 5.069428549629972,
+  "kd_force_mode": 0.05,
+  "force_control": {
+    "max_force": 50.0,
+    "max_torque": 1.5,
+    "wall_margin": 0.05,
+    "max_speed": 2.0,
+    "kd": 0.05
+  },
+  "breakaway_positions": [
+    0.3,
+    0.5,
+    0.7
+  ],
+  "repeats": 3,
+  "ramp_rate_nm_s": 0.2,
+  "dwell_s": 1.0,
+  "motion_threshold": 0.01,
+  "step_torques_nm": [
+    0.2,
+    0.25,
+    0.3,
+    0.4,
+    0.5
+  ],
+  "experiments": [
+    "jaw_travel"
+  ],
+  "sweep_positions": [
+    0.15,
+    0.185,
+    0.21999999999999997,
+    0.255,
+    0.29,
+    0.32499999999999996,
+    0.36,
+    0.39499999999999996,
+    0.42999999999999994,
+    0.46499999999999997,
+    0.5,
+    0.5349999999999999,
+    0.57,
+    0.605,
+    0.6399999999999999,
+    0.6749999999999999,
+    0.71,
+    0.745,
+    0.7799999999999999,
+    0.815,
+    0.85
+  ],
+  "sweep_repeats": 1,
+  "sweep_approach": 0.03,
+  "torque_convention": "motor torque, positive closes"
+}
